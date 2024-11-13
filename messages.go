@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"io"
 
+	"mellium.im/sasl"
+
 	"gopkg.in/pg.v5/internal"
 	"gopkg.in/pg.v5/internal/pool"
 	"gopkg.in/pg.v5/orm"
 	"gopkg.in/pg.v5/types"
 )
 
+// https://www.postgresql.org/docs/current/protocol-message-formats.html
 const (
 	commandCompleteMsg  = 'C'
 	errorResponseMsg    = 'E'
@@ -25,6 +28,16 @@ const (
 	noDataMsg           = 'n'
 	passwordMessageMsg  = 'p'
 	terminateMsg        = 'X'
+
+	saslInitialResponseMsg        = 'p'
+	authenticationSASLContinueMsg = 'R'
+	saslResponseMsg               = 'p'
+	authenticationSASLFinalMsg    = 'R'
+
+	authenticationOK                = 0
+	authenticationCleartextPassword = 3
+	authenticationMD5Password       = 5
+	authenticationSASL              = 10
 
 	notificationResponseMsg = 'A'
 
@@ -127,9 +140,9 @@ func authenticate(cn *pool.Conn, user, password string) error {
 		return err
 	}
 	switch num {
-	case 0:
+	case authenticationOK:
 		return nil
-	case 3:
+	case authenticationCleartextPassword:
 		writePasswordMsg(cn.Wr, password)
 		if err := cn.FlushWriter(); err != nil {
 			return err
@@ -158,7 +171,7 @@ func authenticate(cn *pool.Conn, user, password string) error {
 		default:
 			return fmt.Errorf("pg: unknown password message response: %q", c)
 		}
-	case 5:
+	case authenticationMD5Password:
 		b, err := cn.ReadN(4)
 		if err != nil {
 			return err
@@ -193,6 +206,92 @@ func authenticate(cn *pool.Conn, user, password string) error {
 		default:
 			return fmt.Errorf("pg: unknown password message response: %q", c)
 		}
+	case authenticationSASL:
+		var saslMech sasl.Mechanism
+	loop:
+		for {
+			s, err := readString(cn)
+			if err != nil {
+				return err
+			}
+
+			switch s {
+			case "":
+				break loop
+			case sasl.ScramSha256.Name:
+				saslMech = sasl.ScramSha256
+			case sasl.ScramSha256Plus.Name:
+				// ignore
+			default:
+				return fmt.Errorf("got %q, wanted %q", s, sasl.ScramSha256.Name)
+			}
+		}
+
+		creds := sasl.Credentials(func() (Username, Password, Identity []byte) {
+			return []byte(user), []byte(password), nil
+		})
+		client := sasl.NewClient(saslMech, creds)
+
+		_, resp, err := client.Step(nil)
+		if err != nil {
+			return err
+		}
+
+		cn.Wr.StartMessage(saslInitialResponseMsg)
+		cn.Wr.WriteString(saslMech.Name)
+		cn.Wr.WriteInt32(int32(len(resp)))
+		_, err = cn.Wr.Write(resp)
+		if err != nil {
+			return err
+		}
+		cn.Wr.FinishMessage()
+		if err := cn.FlushWriter(); err != nil {
+			return err
+		}
+
+		typ, n, err := readMessageType(cn)
+		if err != nil {
+			return err
+		}
+		switch typ {
+		case authenticationSASLContinueMsg:
+			c11, err := readInt32(cn)
+			if err != nil {
+				return err
+			}
+			if c11 != 11 {
+				return fmt.Errorf("pg: SASL: got %q, wanted %q", typ, 11)
+			}
+			b, err := cn.ReadN(n - 4)
+			if err != nil {
+				return err
+			}
+			_, resp, err = client.Step(b)
+			if err != nil {
+				return err
+			}
+			cn.Wr.StartMessage(saslResponseMsg)
+			_, err = cn.Wr.Write(resp)
+			if err != nil {
+				return err
+			}
+			cn.Wr.FinishMessage()
+			if err := cn.FlushWriter(); err != nil {
+				return err
+			}
+			return readAuthSASLFinal(cn, client)
+
+		case errorResponseMsg:
+			e, err := readError(cn)
+			if err != nil {
+				return err
+			}
+			return e
+		default:
+			return fmt.Errorf(
+				"pg: SASL: got %q, wanted %q", typ, authenticationSASLContinueMsg)
+		}
+
 	default:
 		return fmt.Errorf("pg: unknown authentication message response: %d", num)
 	}
@@ -1089,4 +1188,75 @@ func logNotice(cn *pool.Conn, msgLen int) error {
 func logParameterStatus(cn *pool.Conn, msgLen int) error {
 	_, err := cn.ReadN(msgLen)
 	return err
+}
+
+func readAuthSASLFinal(cn *pool.Conn, client *sasl.Negotiator) error {
+	c, n, err := readMessageType(cn)
+	if err != nil {
+		return err
+	}
+
+	switch c {
+	case authenticationSASLFinalMsg:
+		c12, err := readInt32(cn)
+		if err != nil {
+			return err
+		}
+		if c12 != 12 {
+			return fmt.Errorf("pg: SASL: got %q, wanted %q", c, 12)
+		}
+
+		b, err := cn.ReadN(n - 4)
+		if err != nil {
+			return err
+		}
+
+		_, _, err = client.Step(b)
+		if err != nil {
+			return err
+		}
+
+		if client.State() != sasl.ValidServerResponse {
+			return fmt.Errorf("pg: SASL: state=%q, wanted %q",
+				client.State(), sasl.ValidServerResponse)
+		}
+	case errorResponseMsg:
+		e, err := readError(cn)
+		if err != nil {
+			return err
+		}
+		return e
+	default:
+		return fmt.Errorf(
+			"pg: SASL: got %q, wanted %q", c, authenticationSASLFinalMsg)
+	}
+
+	return readAuthOK(cn)
+}
+
+func readAuthOK(cn *pool.Conn) error {
+	c, _, err := readMessageType(cn)
+	if err != nil {
+		return err
+	}
+
+	switch c {
+	case authenticationOKMsg:
+		c0, err := readInt32(cn)
+		if err != nil {
+			return err
+		}
+		if c0 != 0 {
+			return fmt.Errorf("pg: unexpected authentication code: %q", c0)
+		}
+		return nil
+	case errorResponseMsg:
+		e, err := readError(cn)
+		if err != nil {
+			return err
+		}
+		return e
+	default:
+		return fmt.Errorf("pg: unknown password message response: %q", c)
+	}
 }
