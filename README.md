@@ -1,4 +1,12 @@
-# PostgreSQL client for Golang [![Build Status](https://travis-ci.org/go-pg/pg.svg)](https://travis-ci.org/go-pg/pg)
+# PostgreSQL client for Golang (v4 with SASL support)
+
+_Forked from https://github.com/go-pg/pg_
+## How to use:
+Add this line in your application go.mod file
+```
+replace gopkg.in/pg.v4 => github.com/TheRedBricks/go-pg v4.9.6+incompatible
+```
+And then run `go mod tidy`
 
 Supports:
 
