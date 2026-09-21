@@ -132,7 +132,9 @@ func (tx *Tx) Exec(query interface{}, params ...interface{}) (*types.Result, err
 		return nil, err
 	}
 
+	hookCtx, event := tx.db.beforeQuery(query, params)
 	res, err := simpleQuery(cn, query, params...)
+	tx.db.afterQuery(hookCtx, event, res, err)
 	tx.freeConn(cn, err)
 	return res, err
 }
@@ -155,7 +157,9 @@ func (tx *Tx) Query(model interface{}, query interface{}, params ...interface{})
 		return nil, err
 	}
 
+	hookCtx, event := tx.db.beforeQuery(query, params)
 	res, mod, err := simpleQueryData(cn, model, query, params...)
+	tx.db.afterQuery(hookCtx, event, res, err)
 	tx.freeConn(cn, err)
 	if err != nil {
 		return nil, err
