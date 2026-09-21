@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -30,6 +31,13 @@ type DB struct {
 	opt   *Options
 	pool  *pool.ConnPool
 	fmter orm.Formatter
+
+	// ctx is what WithContext set, handed to QueryHooks. Nil means none; use
+	// Context() rather than reading it directly.
+	ctx context.Context
+	// queryHooks is read on the query path without synchronisation, so it must
+	// only be appended to during setup. See AddQueryHook.
+	queryHooks []QueryHook
 }
 
 var _ orm.DB = (*DB)(nil)
@@ -49,18 +57,22 @@ func (db *DB) WithTimeout(d time.Duration) *DB {
 	newopt.ReadTimeout = d
 	newopt.WriteTimeout = d
 	return &DB{
-		opt:   &newopt,
-		pool:  db.pool,
-		fmter: db.fmter,
+		opt:        &newopt,
+		pool:       db.pool,
+		fmter:      db.fmter,
+		ctx:        db.ctx,
+		queryHooks: db.queryHooks,
 	}
 }
 
 // WithParam returns a DB that replaces the param with the value in queries.
 func (db *DB) WithParam(param string, value interface{}) *DB {
 	return &DB{
-		opt:   db.opt,
-		pool:  db.pool,
-		fmter: db.fmter.WithParam(param, value),
+		opt:        db.opt,
+		pool:       db.pool,
+		fmter:      db.fmter.WithParam(param, value),
+		ctx:        db.ctx,
+		queryHooks: db.queryHooks,
 	}
 }
 
@@ -345,6 +357,15 @@ func (db *DB) cancelRequest(processId, secretKey int32) error {
 func (db *DB) simpleQuery(
 	cn *pool.Conn, query interface{}, params ...interface{},
 ) (*types.Result, error) {
+	ctx, event := db.beforeQuery(query, params)
+	res, err := db.simpleQueryNoHooks(cn, query, params...)
+	db.afterQuery(ctx, event, res, err)
+	return res, err
+}
+
+func (db *DB) simpleQueryNoHooks(
+	cn *pool.Conn, query interface{}, params ...interface{},
+) (*types.Result, error) {
 	if err := writeQueryMsg(cn.Wr, db, query, params...); err != nil {
 		return nil, err
 	}
@@ -357,6 +378,15 @@ func (db *DB) simpleQuery(
 }
 
 func (db *DB) simpleQueryData(
+	cn *pool.Conn, model, query interface{}, params ...interface{},
+) (*types.Result, orm.Model, error) {
+	ctx, event := db.beforeQuery(query, params)
+	res, mod, err := db.simpleQueryDataNoHooks(cn, model, query, params...)
+	db.afterQuery(ctx, event, res, err)
+	return res, mod, err
+}
+
+func (db *DB) simpleQueryDataNoHooks(
 	cn *pool.Conn, model, query interface{}, params ...interface{},
 ) (*types.Result, orm.Model, error) {
 	if err := writeQueryMsg(cn.Wr, db, query, params...); err != nil {
