@@ -121,3 +121,88 @@ func TestUnformattedQueryKeepsPlaceholders(t *testing.T) {
 		t.Error("UnformattedQuery claimed a non-string query was raw SQL")
 	}
 }
+
+// TestSiblingCopiesDoNotShareHookStorage is the reviewer's finding: WithContext
+// and friends hand their copies the same slice header, so an in-place append
+// writes into storage a sibling may also be appending into — and the loser's
+// hook is silently overwritten. Sequential setup code is enough to hit it; no
+// concurrency required.
+func TestSiblingCopiesDoNotShareHookStorage(t *testing.T) {
+	var order []string
+	base := &DB{}
+	// Three first, so the slice has spare capacity for an in-place append to
+	// land in — which is exactly what made the clobber possible.
+	base.AddQueryHook(&recordingHook{name: "1", order: &order})
+	base.AddQueryHook(&recordingHook{name: "2", order: &order})
+	base.AddQueryHook(&recordingHook{name: "3", order: &order})
+
+	left := base.WithContext(context.Background())
+	right := base.WithContext(context.Background())
+	left.AddQueryHook(&recordingHook{name: "left", order: &order})
+	right.AddQueryHook(&recordingHook{name: "right", order: &order})
+
+	if got := hookNames(left); got != "1,2,3,left" {
+		t.Errorf("left hooks = %s, want 1,2,3,left", got)
+	}
+	if got := hookNames(right); got != "1,2,3,right" {
+		t.Errorf("right hooks = %s, want 1,2,3,right — a sibling overwrote it", got)
+	}
+	if got := hookNames(base); got != "1,2,3" {
+		t.Errorf("base hooks = %s, want 1,2,3 — a copy mutated its parent", got)
+	}
+}
+
+func hookNames(db *DB) string {
+	out := ""
+	for i, h := range db.queryHooks {
+		if i > 0 {
+			out += ","
+		}
+		out += h.(*recordingHook).name
+	}
+	return out
+}
+
+// TestHooksFireOncePerLogicalQuery pins the boundary the reviewer asked for:
+// one pair per query the caller issued, wrapping connection acquisition and any
+// retries, reporting the final outcome — not one pair per attempt.
+func TestHooksFireOncePerLogicalQuery(t *testing.T) {
+	var order []string
+	db := unreachableDB()
+	db.AddQueryHook(&recordingHook{name: "h", order: &order})
+
+	// Nothing is listening, so every attempt fails at connection acquisition —
+	// the case that previously produced no event at all in v5.
+	_, _ = db.Exec("SELECT 1")
+
+	if len(order) != 2 || order[0] != "before:h" || order[1] != "after:h" {
+		t.Fatalf("hook calls = %v, want exactly one before/after pair", order)
+	}
+}
+
+// TestFailedAcquisitionReportsTheError proves the event carries the failure
+// rather than being skipped: a hook that only ever sees successes cannot tell
+// "database is down" from "no traffic".
+func TestFailedAcquisitionReportsTheError(t *testing.T) {
+	var order []string
+	hook := &recordingHook{name: "h", order: &order}
+	db := unreachableDB()
+	db.AddQueryHook(hook)
+
+	_, _ = db.Exec("SELECT 1")
+
+	if hook.sawErr == nil {
+		t.Error("AfterQuery saw no error for a query that could not get a connection")
+	}
+}
+
+// unreachableDB dials a port nothing listens on, so every connection attempt
+// fails fast and locally — no live server, no network, no timeout wait.
+func unreachableDB() *DB {
+	return Connect(&Options{
+		Addr:        "127.0.0.1:1",
+		User:        "nobody",
+		DialTimeout: 200 * time.Millisecond,
+		MaxRetries:  0,
+	})
+}

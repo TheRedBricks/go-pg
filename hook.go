@@ -59,8 +59,15 @@ type QueryHook interface {
 // AddQueryHook registers a hook. Call it during setup, before the DB serves
 // traffic: the hook slice is read without synchronisation on the query path, so
 // registering while queries are in flight is a data race.
+//
+// Registration allocates fresh storage rather than appending in place. WithContext
+// and friends hand their copies the same slice header, so an in-place append writes
+// into storage a sibling may also be appending into — and the loser's hook is
+// silently overwritten, even when both registrations are sequential setup code.
 func (db *DB) AddQueryHook(hook QueryHook) {
-	db.queryHooks = append(db.queryHooks, hook)
+	hooks := make([]QueryHook, len(db.queryHooks), len(db.queryHooks)+1)
+	copy(hooks, db.queryHooks)
+	db.queryHooks = append(hooks, hook)
 }
 
 // WithContext returns a DB that runs its queries with ctx, sharing the
