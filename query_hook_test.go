@@ -206,3 +206,44 @@ func unreachableDB() *DB {
 		MaxRetries:  0,
 	})
 }
+
+type fakeDescriber struct{ op, table string }
+
+func (f fakeDescriber) StatementOperation() string { return f.op }
+func (f fakeDescriber) StatementTable() string     { return f.table }
+
+// Statement is how a hook names a Model(...) query on this version. There is no
+// text counterpart: clauses are rendered at build time, so the placeholder form
+// no longer exists by the time a hook runs.
+func TestStatementDescribesBuilderQueries(t *testing.T) {
+	ev := &QueryEvent{Query: fakeDescriber{op: "SELECT", table: "settings"}}
+	op, table := ev.Statement()
+	if op != "SELECT" || table != "settings" {
+		t.Errorf("Statement() = %q, %q; want SELECT, settings", op, table)
+	}
+
+	op, table = (&QueryEvent{Query: "SELECT * FROM settings"}).Statement()
+	if op != "" || table != "" {
+		t.Errorf("Statement() on raw SQL = %q, %q; want empty", op, table)
+	}
+
+	op, table = (&QueryEvent{Query: struct{}{}}).Statement()
+	if op != "" || table != "" {
+		t.Errorf("Statement() on an unknown query = %q, %q; want empty", op, table)
+	}
+}
+
+// The safety property that makes the missing text acceptable: a builder query
+// must never be handed back as SQL. UnformattedQuery answers only for raw SQL,
+// where the placeholders were never substituted, so a caller cannot reach the
+// rendered form through it by accident.
+func TestUnformattedQueryRefusesBuilders(t *testing.T) {
+	if _, ok := (&QueryEvent{Query: fakeDescriber{op: "SELECT", table: "settings"}}).UnformattedQuery(); ok {
+		t.Error("UnformattedQuery claimed a builder query was raw SQL")
+	}
+
+	got, ok := (&QueryEvent{Query: "SELECT * FROM settings WHERE id = ?"}).UnformattedQuery()
+	if !ok || got != "SELECT * FROM settings WHERE id = ?" {
+		t.Errorf("UnformattedQuery() = %q, %v; want the placeholder form", got, ok)
+	}
+}

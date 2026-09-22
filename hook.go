@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"gopkg.in/pg.v4/orm"
 	"gopkg.in/pg.v4/types"
 )
 
@@ -44,6 +45,20 @@ func (ev *QueryEvent) FormattedQuery() (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// Statement returns the SQL verb and the target relation for a query built with
+// Model(...), and two empty strings for raw SQL — use UnformattedQuery for that.
+//
+// There is no text counterpart on this version. Clauses are formatted as the
+// caller builds them, so a hook only ever sees bytes with the values already
+// substituted; see orm.StatementDescriber for why that is not recoverable here.
+func (ev *QueryEvent) Statement() (operation, table string) {
+	d, ok := ev.Query.(orm.StatementDescriber)
+	if !ok {
+		return "", ""
+	}
+	return d.StatementOperation(), d.StatementTable()
 }
 
 // QueryHook observes every statement this DB runs.
