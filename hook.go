@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"gopkg.in/pg.v5/orm"
 	"gopkg.in/pg.v5/types"
 )
 
@@ -31,6 +32,22 @@ type QueryEvent struct {
 func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 	q, ok := ev.Query.(string)
 	return q, ok
+}
+
+// Statement returns the SQL verb and the target relation for a query built with
+// Model(...), and two empty strings for raw SQL — use UnformattedQuery for that.
+//
+// This is the builder's own answer, not a parse of rendered SQL, and it is the
+// only way to learn what a Model query touches without rendering it: rendering
+// substitutes every bound parameter, so the rendered text of a Model query
+// carries the ids and addresses a span attribute must not. Both values here are
+// safe to export — a keyword and an identifier declared in a struct tag.
+func (ev *QueryEvent) Statement() (operation, table string) {
+	d, ok := ev.Query.(orm.StatementDescriber)
+	if !ok {
+		return "", ""
+	}
+	return d.StatementOperation(), d.StatementTable()
 }
 
 // FormattedQuery returns the statement exactly as it went to the server.

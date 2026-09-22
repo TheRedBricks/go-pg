@@ -194,3 +194,31 @@ func unreachableDB() *DB {
 		MaxRetries:  0,
 	})
 }
+
+type fakeDescriber struct{ op, table string }
+
+func (f fakeDescriber) StatementOperation() string { return f.op }
+func (f fakeDescriber) StatementTable() string     { return f.table }
+
+// Statement is how a hook names a Model(...) query without rendering it.
+// UnformattedQuery cannot answer for a builder, and FormattedQuery inlines
+// every bound value, so before this there was no safe answer at all.
+func TestStatementDescribesBuilderQueries(t *testing.T) {
+	ev := &QueryEvent{Query: fakeDescriber{op: "SELECT", table: "bookings"}}
+	op, table := ev.Statement()
+	if op != "SELECT" || table != "bookings" {
+		t.Errorf("Statement() = %q, %q; want SELECT, bookings", op, table)
+	}
+
+	// Raw SQL is UnformattedQuery's job; Statement must not guess at it.
+	op, table = (&QueryEvent{Query: "SELECT * FROM bookings"}).Statement()
+	if op != "" || table != "" {
+		t.Errorf("Statement() on raw SQL = %q, %q; want empty", op, table)
+	}
+
+	// Anything else reports nothing rather than panicking.
+	op, table = (&QueryEvent{Query: struct{}{}}).Statement()
+	if op != "" || table != "" {
+		t.Errorf("Statement() on an unknown query = %q, %q; want empty", op, table)
+	}
+}
