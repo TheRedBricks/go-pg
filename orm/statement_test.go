@@ -1,6 +1,9 @@
 package orm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 type StatementModel struct {
 	Id   int
@@ -60,5 +63,121 @@ func TestStatementTableEmptyWithoutModel(t *testing.T) {
 	ignored := selectQuery{Query: q}
 	if got := ignored.StatementTable(); got != "" {
 		t.Errorf("StatementTable() with an ignored model = %q, want empty", got)
+	}
+}
+
+// The whole point: a rendered statement may carry structure and must not carry
+// data. Every value below is distinctive so the assertion is "this string does
+// not appear anywhere in the output" rather than a shape comparison.
+func TestStatementTextSubstitutesNoValues(t *testing.T) {
+	secrets := []string{
+		"victim@example.com",
+		"4111111111111111",
+		"tenant-42",
+		"P@ssw0rd",
+	}
+
+	q := NewQuery(nil, &StatementModel{Id: 99, Name: "victim@example.com"}).
+		Where("email = ?", "victim@example.com").
+		Where("card = ?", "4111111111111111").
+		Where("tenant = ?0", "tenant-42").
+		Where("secret = ?", Q("?", "P@ssw0rd"))
+
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	for _, s := range secrets {
+		if strings.Contains(text, s) {
+			t.Errorf("rendered statement leaked %q:\n%s", s, text)
+		}
+	}
+	// It has to still be a statement, not an empty string that trivially passes.
+	if !strings.Contains(text, "SELECT") || !strings.Contains(text, "statement_models") {
+		t.Errorf("rendered statement lost its structure:\n%s", text)
+	}
+	if !strings.Contains(text, "?") {
+		t.Errorf("rendered statement has no placeholders left:\n%s", text)
+	}
+}
+
+// A named placeholder resolving to a model FIELD is data, and go-pg resolves it
+// through the same call that yields the table alias — so the two have to be
+// told apart rather than allowed wholesale.
+func TestStatementTextKeepsStructureButNotFields(t *testing.T) {
+	q := NewQuery(nil, &StatementModel{Id: 7, Name: "confidential"}).
+		Where("?TableAlias.name = ?name", nil)
+
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if strings.Contains(text, "confidential") {
+		t.Errorf("a model field value was rendered:\n%s", text)
+	}
+	if !strings.Contains(text, "statement_model") {
+		t.Errorf("?TableAlias did not render, so the SQL is not usable:\n%s", text)
+	}
+}
+
+// WithParam values are data too, and they arrive by a different route than
+// positional params.
+func TestStatementTextIgnoresWithParam(t *testing.T) {
+	base := Formatter{}
+	f := base.WithParam("tenant", "acme-secret")
+	sanitized := f.Sanitized()
+
+	got := string(sanitized.Append(nil, "SELECT * FROM t WHERE x = ?tenant", nil))
+	if strings.Contains(got, "acme-secret") {
+		t.Errorf("WithParam value leaked: %q", got)
+	}
+
+	// The unsanitized formatter must be unchanged — Sanitized copies, not mutates.
+	live := string(f.Append(nil, "SELECT * FROM t WHERE x = ?tenant", nil))
+	if !strings.Contains(live, "acme-secret") {
+		t.Errorf("Sanitized() mutated the original formatter: %q", live)
+	}
+}
+
+// Rendering must not disturb the query that is about to run.
+func TestStatementTextDoesNotMutateTheQuery(t *testing.T) {
+	q := NewQuery(nil, &StatementModel{}).Where("email = ?", "real@example.com")
+
+	sq := selectQuery{Query: q}
+	if _, err := sq.StatementText(); err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+
+	b, err := selectQuery{Query: q}.AppendQuery(nil)
+	if err != nil {
+		t.Fatalf("AppendQuery: %v", err)
+	}
+	if !strings.Contains(string(b), "real@example.com") {
+		t.Errorf("the live query stopped substituting values after a sanitized render:\n%s", b)
+	}
+	if q.sanitize {
+		t.Error("sanitize leaked onto the original query")
+	}
+}
+
+// Identifiers are structure. Sanitizing them away turns a readable statement
+// into `ORDER BY ? ?`, which costs the whole point of recording the text.
+func TestStatementTextKeepsIdentifiers(t *testing.T) {
+	q := NewQuery(nil, &StatementModel{}).
+		Where("email = ?", "victim@example.com").
+		Order("created_at DESC")
+
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if !strings.Contains(text, `ORDER BY "created_at" DESC`) {
+		t.Errorf("ORDER BY lost its identifiers:\n%s", text)
+	}
+	if strings.Contains(text, "victim@example.com") {
+		t.Errorf("value leaked alongside the identifiers:\n%s", text)
 	}
 }

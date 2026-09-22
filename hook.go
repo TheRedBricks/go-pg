@@ -42,6 +42,25 @@ func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 // substitutes every bound parameter, so the rendered text of a Model query
 // carries the ids and addresses a span attribute must not. Both values here are
 // safe to export — a keyword and an identifier declared in a struct tag.
+// StatementText renders a builder query as a template: full SQL structure with
+// every bound value left as its placeholder, so it is safe on a span. Returns
+// "" for raw SQL — UnformattedQuery already has that, unrendered and therefore
+// safer still.
+//
+// Contrast FormattedQuery, which substitutes every value and must never leave
+// the process.
+func (ev *QueryEvent) StatementText() string {
+	d, ok := ev.Query.(orm.StatementDescriber)
+	if !ok {
+		return ""
+	}
+	text, err := d.StatementText()
+	if err != nil {
+		return ""
+	}
+	return text
+}
+
 func (ev *QueryEvent) Statement() (operation, table string) {
 	d, ok := ev.Query.(orm.StatementDescriber)
 	if !ok {

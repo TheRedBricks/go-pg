@@ -22,6 +22,11 @@ type Query struct {
 
 	model       tableModel
 	ignoreModel bool
+	// sanitize renders this query as a template: placeholders instead of bound
+	// values. Set only on the throwaway copy StatementText builds, never on a
+	// query that will actually be executed. Deliberately packed beside
+	// ignoreModel — it fits that field's padding, so Query does not grow.
+	sanitize bool
 
 	with       []withQuery
 	tables     []FormatAppender
@@ -206,7 +211,7 @@ func (q *Query) WhereOr(where string, params ...interface{}) *Query {
 
 // WhereIn is a shortcut for Where and pg.In to work with IN operator:
 //
-//    WhereIn("id IN (?)", 1, 2, 3)
+//	WhereIn("id IN (?)", 1, 2, 3)
 func (q *Query) WhereIn(where string, params ...interface{}) *Query {
 	return q.Where(where, types.In(params))
 }
@@ -580,6 +585,11 @@ func (q *Query) Delete() (*types.Result, error) {
 
 func (q *Query) FormatQuery(dst []byte, query string, params ...interface{}) []byte {
 	params = append(params, q.model)
+	if q.sanitize {
+		// Deliberately not q.db's formatter: that one carries WithParam values,
+		// which are data. A sanitized render must not reach them.
+		return Formatter{sanitize: true}.Append(dst, query, params...)
+	}
 	if q.db != nil {
 		return q.db.FormatQuery(dst, query, params...)
 	}

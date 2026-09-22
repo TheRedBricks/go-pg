@@ -195,10 +195,11 @@ func unreachableDB() *DB {
 	})
 }
 
-type fakeDescriber struct{ op, table string }
+type fakeDescriber struct{ op, table, text string }
 
-func (f fakeDescriber) StatementOperation() string { return f.op }
-func (f fakeDescriber) StatementTable() string     { return f.table }
+func (f fakeDescriber) StatementOperation() string     { return f.op }
+func (f fakeDescriber) StatementTable() string         { return f.table }
+func (f fakeDescriber) StatementText() (string, error) { return f.text, nil }
 
 // Statement is how a hook names a Model(...) query without rendering it.
 // UnformattedQuery cannot answer for a builder, and FormattedQuery inlines
@@ -220,5 +221,21 @@ func TestStatementDescribesBuilderQueries(t *testing.T) {
 	op, table = (&QueryEvent{Query: struct{}{}}).Statement()
 	if op != "" || table != "" {
 		t.Errorf("Statement() on an unknown query = %q, %q; want empty", op, table)
+	}
+}
+
+// StatementText is the template form — structure with placeholders — and must
+// stay empty for raw SQL, where UnformattedQuery already has the real thing.
+func TestStatementTextOnlyAnswersForBuilders(t *testing.T) {
+	ev := &QueryEvent{Query: fakeDescriber{op: "SELECT", table: "bookings", text: "SELECT * FROM bookings WHERE id = ?"}}
+	if got := ev.StatementText(); got != "SELECT * FROM bookings WHERE id = ?" {
+		t.Errorf("StatementText() = %q", got)
+	}
+
+	if got := (&QueryEvent{Query: "SELECT 1"}).StatementText(); got != "" {
+		t.Errorf("StatementText() on raw SQL = %q, want empty", got)
+	}
+	if got := (&QueryEvent{Query: struct{}{}}).StatementText(); got != "" {
+		t.Errorf("StatementText() on an unknown query = %q, want empty", got)
 	}
 }
