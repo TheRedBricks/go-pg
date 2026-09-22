@@ -274,14 +274,42 @@ func isStructuralParam(name string) bool {
 // isStructuralParamValue reports whether a positional parameter is part of the
 // statement's structure rather than a bound value.
 //
-// types.F is an identifier and types.Q is a raw SQL fragment: both are written
-// in the calling code, never taken from a request the way a bound value is.
-// Rendering them is what keeps a sanitized ORDER BY readable as
-// `ORDER BY "created_at" DESC` instead of the useless `ORDER BY ? ?`.
+// types.F is an identifier — always structure, always safe to render.
+//
+// types.Q is deliberately NOT treated as structure despite being "raw SQL".
+// go-pg builds relation joins by pre-rendering the parent rows' primary keys
+// and wrapping them in types.Q (see the `(?) IN (?)` in join.go), so trusting
+// the type would export exactly the row ids this is meant to withhold. The one
+// exception is a sort direction, which is a closed two-value set and is what
+// keeps ORDER BY readable.
 func isStructuralParamValue(param interface{}) bool {
-	switch param.(type) {
-	case types.F, types.Q:
+	switch p := param.(type) {
+	case types.F:
+		return true
+	case types.Q:
+		return isSortDirection(string(p))
+	}
+	return false
+}
+
+func isSortDirection(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "ASC", "DESC":
 		return true
 	}
 	return false
+}
+
+// sanitizer is implemented by the formatters that carry the sanitize flag, so
+// an appender that bypasses FormatQuery entirely can still honour it.
+type sanitizer interface {
+	sanitizing() bool
+}
+
+func (f Formatter) sanitizing() bool { return f.sanitize }
+
+// isSanitizing reports whether this render must withhold bound values.
+func isSanitizing(f QueryFormatter) bool {
+	s, ok := f.(sanitizer)
+	return ok && s.sanitizing()
 }

@@ -135,6 +135,21 @@ func appendColumnAndValue(b []byte, v reflect.Value, table *Table, fields []*Fie
 	return b
 }
 
+// appendColumnAndPlaceholder is appendColumnAndValue with the values withheld:
+// same columns, same AND structure, a placeholder where each value would be.
+func appendColumnAndPlaceholder(b []byte, table *Table, fields []*Field) []byte {
+	for i, f := range fields {
+		if i > 0 {
+			b = append(b, " AND "...)
+		}
+		b = append(b, table.Alias...)
+		b = append(b, '.')
+		b = append(b, f.ColName...)
+		b = append(b, " = ?"...)
+	}
+	return b
+}
+
 func modelId(b []byte, v reflect.Value, fields []*Field) []byte {
 	for _, f := range fields {
 		b = f.AppendValue(b, v, 0)

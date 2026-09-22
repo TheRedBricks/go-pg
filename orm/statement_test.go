@@ -3,6 +3,8 @@ package orm
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/pg.v5/types"
 )
 
 type StatementModel struct {
@@ -179,5 +181,57 @@ func TestStatementTextKeepsIdentifiers(t *testing.T) {
 	}
 	if strings.Contains(text, "victim@example.com") {
 		t.Errorf("value leaked alongside the identifiers:\n%s", text)
+	}
+}
+
+// The leak this caught in production: go-pg loads a has-many relation by
+// pre-rendering the parent rows' primary keys and wrapping them in types.Q,
+// and it fetches by PK through an appender that never consults the formatter.
+// Both routes bypass the placeholder substitution entirely.
+func TestStatementTextWithholdsRelationAndPKValues(t *testing.T) {
+	// WherePK — the appender that renders values without asking the formatter.
+	pkModel := &StatementModel{Id: 4242, Name: "n"}
+	q := NewQuery(nil, pkModel)
+	q.where = append(q.where, wherePKQuery{q})
+
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if strings.Contains(text, "4242") {
+		t.Errorf("WherePK leaked the primary key:\n%s", text)
+	}
+	if !strings.Contains(text, "= ?") {
+		t.Errorf("WherePK lost its structure:\n%s", text)
+	}
+}
+
+// types.Q is how go-pg carries pre-rendered VALUES into a relation join, so it
+// must not be waved through as "raw SQL is structure".
+func TestStatementTextTreatsRawFragmentsAsValues(t *testing.T) {
+	q := NewQuery(nil, &StatementModel{}).
+		Where(`(?) IN (?)`, types.Q(`"t"."parent_id"`), types.Q(`('devpkg00000000000001')`))
+
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if strings.Contains(text, "devpkg00000000000001") {
+		t.Errorf("a types.Q value leaked:\n%s", text)
+	}
+}
+
+// ...except a sort direction, which is a closed set and keeps ORDER BY useful.
+func TestStatementTextKeepsSortDirection(t *testing.T) {
+	q := NewQuery(nil, &StatementModel{}).Order("created_at DESC")
+	sq := selectQuery{Query: q}
+	text, err := sq.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if !strings.Contains(text, `ORDER BY "created_at" DESC`) {
+		t.Errorf("sort direction was elided:\n%s", text)
 	}
 }

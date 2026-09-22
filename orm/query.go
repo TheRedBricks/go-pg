@@ -596,6 +596,8 @@ func (q *Query) FormatQuery(dst []byte, query string, params ...interface{}) []b
 	return Formatter{}.Append(dst, query, params...)
 }
 
+func (q *Query) sanitizing() bool { return q != nil && q.sanitize }
+
 func (q *Query) hasModel() bool {
 	return !q.ignoreModel && q.model != nil
 }
@@ -752,5 +754,10 @@ func (wherePKQuery) AppendSep(b []byte) []byte {
 
 func (q wherePKQuery) AppendFormat(b []byte, f QueryFormatter) []byte {
 	table := q.model.Table()
+	// This appender renders values directly rather than through FormatQuery, so
+	// it is the one place the sanitize flag has to be read off the formatter.
+	if isSanitizing(f) {
+		return appendColumnAndPlaceholder(b, table, table.PKs)
+	}
 	return appendColumnAndValue(b, q.model.Value(), table, table.PKs)
 }
