@@ -679,7 +679,9 @@ func (q *Query) mustAppendWhere(b []byte) ([]byte, error) {
 	}
 
 	b = append(b, " WHERE "...)
-	return wherePKQuery{q}.AppendFormat(b, nil), nil
+	// q, not nil: wherePKQuery reads the sanitize flag off the formatter it is
+	// handed, and a discarded formatter renders the primary key.
+	return wherePKQuery{q}.AppendFormat(b, q), nil
 }
 
 func (q *Query) appendWhere(b []byte) []byte {

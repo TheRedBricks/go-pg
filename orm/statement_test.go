@@ -291,3 +291,40 @@ func TestStatementTextLeaksNothingForAnyStatementKind(t *testing.T) {
 		})
 	}
 }
+
+// UPDATE and DELETE with no explicit Where take a different path: the builder
+// synthesises `WHERE pk = <value>` from the model. That path passed its
+// formatter as nil, so the sanitize flag was invisible and the primary key was
+// rendered — caught in a live span after the SET clause had already been fixed.
+func TestStatementTextWithholdsTheImplicitPrimaryKey(t *testing.T) {
+	const pk = "daovj2dg3nls73bnkdh0"
+
+	for _, tc := range []struct {
+		kind  string
+		build func(*Query) StatementDescriber
+	}{
+		{"update", func(q *Query) StatementDescriber { return updateQuery{Query: q} }},
+		{"delete", func(q *Query) StatementDescriber { return deleteQuery{Query: q} }},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			// No Where at all: this is what makes the builder synthesise one.
+			q := NewQuery(nil, &StringPKModel{Id: pk, Name: "n"})
+
+			text, err := tc.build(q).StatementText()
+			if err != nil {
+				t.Fatalf("StatementText: %v", err)
+			}
+			if strings.Contains(text, pk) {
+				t.Errorf("%s leaked the implicit primary key:\n%s", tc.kind, text)
+			}
+			if !strings.Contains(text, "WHERE") {
+				t.Errorf("%s lost its WHERE clause entirely:\n%s", tc.kind, text)
+			}
+		})
+	}
+}
+
+type StringPKModel struct {
+	Id   string
+	Name string
+}
