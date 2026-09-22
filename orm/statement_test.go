@@ -235,3 +235,59 @@ func TestStatementTextKeepsSortDirection(t *testing.T) {
 		t.Errorf("sort direction was elided:\n%s", text)
 	}
 }
+
+type SecretModel struct {
+	Id       int
+	Email    string
+	Mobile   string
+	UserData string
+}
+
+// The catch-all. Every statement kind, one model full of sentinels, one
+// assertion: none of them may appear in any rendered statement.
+//
+// This is the test that was missing. SELECT was covered and passed while UPDATE
+// and INSERT were exporting whole rows, because a SET clause and a VALUES list
+// are built straight from the model and never reach the substitution loop.
+func TestStatementTextLeaksNothingForAnyStatementKind(t *testing.T) {
+	secrets := []string{
+		"victim@example.com",
+		"60123456789",
+		`{"name":"Devstack admin","email":"dev+admin@mhub.ninja"}`,
+		"9182736455",
+	}
+	model := &SecretModel{
+		Id:       9182736455,
+		Email:    "victim@example.com",
+		Mobile:   "60123456789",
+		UserData: `{"name":"Devstack admin","email":"dev+admin@mhub.ninja"}`,
+	}
+
+	for _, tc := range []struct {
+		kind  string
+		build func(*Query) StatementDescriber
+	}{
+		{"select", func(q *Query) StatementDescriber { return selectQuery{Query: q} }},
+		{"insert", func(q *Query) StatementDescriber { return insertQuery{Query: q} }},
+		{"update", func(q *Query) StatementDescriber { return updateQuery{Query: q} }},
+		{"delete", func(q *Query) StatementDescriber { return deleteQuery{Query: q} }},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			q := NewQuery(nil, model).Where("email = ?", "victim@example.com")
+			q.where = append(q.where, wherePKQuery{q})
+
+			text, err := tc.build(q).StatementText()
+			if err != nil {
+				t.Fatalf("StatementText: %v", err)
+			}
+			for _, s := range secrets {
+				if strings.Contains(text, s) {
+					t.Errorf("%s leaked %q:\n%s", tc.kind, s, text)
+				}
+			}
+			if text == "" {
+				t.Errorf("%s rendered nothing, so the assertion above is vacuous", tc.kind)
+			}
+		})
+	}
+}

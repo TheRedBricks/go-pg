@@ -2,6 +2,7 @@ package orm
 
 import (
 	"errors"
+	"reflect"
 
 	"gopkg.in/pg.v5/internal"
 )
@@ -83,7 +84,7 @@ func (q updateQuery) mustAppendSet(b []byte) ([]byte, error) {
 
 			b = append(b, field.ColName...)
 			b = append(b, " = "...)
-			b = field.AppendValue(b, strct, 1)
+			b = q.appendFieldValue(b, field, strct)
 		}
 		return b, nil
 	}
@@ -96,11 +97,21 @@ func (q updateQuery) mustAppendSet(b []byte) ([]byte, error) {
 
 		b = append(b, field.ColName...)
 		b = append(b, " = "...)
-		b = field.AppendValue(b, strct, 1)
+		b = q.appendFieldValue(b, field, strct)
 		b = append(b, ", "...)
 	}
 	if len(b) > start {
 		b = b[:len(b)-2]
 	}
 	return b, nil
+}
+
+// appendFieldValue writes the column's value, or a placeholder when this render
+// is sanitized. A SET clause is built straight from the model rather than
+// through FormatQuery, so it is one of the few places that has to ask.
+func (q updateQuery) appendFieldValue(b []byte, field *Field, strct reflect.Value) []byte {
+	if q.sanitize {
+		return append(b, '?')
+	}
+	return field.AppendValue(b, strct, 1)
 }
