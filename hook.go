@@ -2,14 +2,16 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"gopkg.in/pg.v5/orm"
 	"gopkg.in/pg.v5/types"
 )
 
-// QueryEvent describes one statement sent to the server. It is passed to every
-// registered QueryHook, before the query runs and again after it returns.
+// QueryEvent describes one logical query operation. It is passed to every
+// registered QueryHook before the operation starts and again after its final
+// result is known, including connection acquisition, retries, and callbacks.
 type QueryEvent struct {
 	StartTime time.Time
 	DB        *DB
@@ -20,6 +22,8 @@ type QueryEvent struct {
 	// Result and Error are only set by the time AfterQuery is called.
 	Result *types.Result
 	Error  error
+
+	prepared bool
 }
 
 // UnformattedQuery returns the statement as the caller wrote it, with its
@@ -29,6 +33,8 @@ type QueryEvent struct {
 // Placeholders are deliberately NOT substituted. The formatted statement
 // inlines every bound value, so for anything that leaves this process — a span
 // attribute, a log line shipped off the box — this is the form to use.
+// Model(...) queries return false; use StatementText for their parameterised
+// SQL template and never fall back to FormattedQuery for exported telemetry.
 func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 	q, ok := ev.Query.(string)
 	return q, ok
@@ -69,12 +75,23 @@ func (ev *QueryEvent) Statement() (operation, table string) {
 	return d.StatementOperation(), d.StatementTable()
 }
 
-// FormattedQuery returns the statement exactly as it went to the server.
+// FormattedQuery returns the statement exactly as it went to the server for
+// raw and query-builder operations.
 //
 // ⚠️ This INLINES every bound parameter, so it contains whatever the caller
 // passed — ids, emails, whole row payloads. Safe for local debugging; not safe
 // to put on a span or ship anywhere. Prefer UnformattedQuery for those.
+//
+// PostgreSQL prepared statements use $1-style placeholders, which the query
+// formatter cannot substitute. FormattedQuery returns an error for those
+// events rather than returning unchanged SQL and claiming it was formatted.
 func (ev *QueryEvent) FormattedQuery() (string, error) {
+	if ev.prepared && len(ev.Params) > 0 {
+		return "", errors.New("pg: cannot format PostgreSQL prepared-statement parameters")
+	}
+	if ev.DB == nil {
+		return "", errors.New("pg: QueryEvent has no DB")
+	}
 	b, err := appendQuery(nil, ev.DB.fmter, ev.Query, ev.Params...)
 	if err != nil {
 		return "", err
@@ -82,7 +99,12 @@ func (ev *QueryEvent) FormattedQuery() (string, error) {
 	return string(b), nil
 }
 
-// QueryHook observes every statement this DB runs.
+// QueryHook observes logical Exec and Query operations run through DB, Tx, and
+// Stmt. One before/after pair covers connection acquisition, retries, backoff,
+// callbacks, and the final result or error.
+//
+// CopyFrom, CopyTo, LISTEN/UNLISTEN, statement preparation, and internal
+// session setup are not observed.
 //
 // BeforeQuery's returned context is handed back to AfterQuery, which is how a
 // hook carries state — a span, a start time — across the two calls without a
@@ -137,7 +159,7 @@ func (db *DB) Context() context.Context {
 // be given. It allocates nothing when no hook is registered, which is the case
 // for every caller that has not opted in.
 func (db *DB) beforeQuery(query interface{}, params []interface{}) (context.Context, *QueryEvent) {
-	if len(db.queryHooks) == 0 {
+	if db == nil || len(db.queryHooks) == 0 {
 		return nil, nil
 	}
 	event := &QueryEvent{
@@ -151,6 +173,14 @@ func (db *DB) beforeQuery(query interface{}, params []interface{}) (context.Cont
 		if next := hook.BeforeQuery(ctx, event); next != nil {
 			ctx = next
 		}
+	}
+	return ctx, event
+}
+
+func (db *DB) beforePreparedQuery(query string, params []interface{}) (context.Context, *QueryEvent) {
+	ctx, event := db.beforeQuery(query, params)
+	if event != nil {
+		event.prepared = true
 	}
 	return ctx, event
 }

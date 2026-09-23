@@ -154,6 +154,9 @@ func (db *DB) Close() error {
 // Exec executes a query ignoring returned rows. The params are for any
 // placeholders in the query.
 func (db *DB) Exec(query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := db.beforeQuery(query, params)
+	defer func() { db.afterQuery(hookCtx, event, res, err) }()
+
 	for i := 0; ; i++ {
 		var cn *pool.Conn
 
@@ -195,6 +198,9 @@ func (db *DB) ExecOne(query interface{}, params ...interface{}) (*types.Result, 
 // Query executes a query that returns rows, typically a SELECT.
 // The params are for any placeholders in the query.
 func (db *DB) Query(model, query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := db.beforeQuery(query, params)
+	defer func() { db.afterQuery(hookCtx, event, res, err) }()
+
 	var mod orm.Model
 	for i := 0; i < 3; i++ {
 		var cn *pool.Conn
@@ -357,15 +363,6 @@ func (db *DB) cancelRequest(processId, secretKey int32) error {
 func (db *DB) simpleQuery(
 	cn *pool.Conn, query interface{}, params ...interface{},
 ) (*types.Result, error) {
-	ctx, event := db.beforeQuery(query, params)
-	res, err := db.simpleQueryNoHooks(cn, query, params...)
-	db.afterQuery(ctx, event, res, err)
-	return res, err
-}
-
-func (db *DB) simpleQueryNoHooks(
-	cn *pool.Conn, query interface{}, params ...interface{},
-) (*types.Result, error) {
 	if err := writeQueryMsg(cn.Wr, db, query, params...); err != nil {
 		return nil, err
 	}
@@ -378,15 +375,6 @@ func (db *DB) simpleQueryNoHooks(
 }
 
 func (db *DB) simpleQueryData(
-	cn *pool.Conn, model, query interface{}, params ...interface{},
-) (*types.Result, orm.Model, error) {
-	ctx, event := db.beforeQuery(query, params)
-	res, mod, err := db.simpleQueryDataNoHooks(cn, model, query, params...)
-	db.afterQuery(ctx, event, res, err)
-	return res, mod, err
-}
-
-func (db *DB) simpleQueryDataNoHooks(
 	cn *pool.Conn, model, query interface{}, params ...interface{},
 ) (*types.Result, orm.Model, error) {
 	if err := writeQueryMsg(cn.Wr, db, query, params...); err != nil {

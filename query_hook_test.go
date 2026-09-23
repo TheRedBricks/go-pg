@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -108,6 +109,12 @@ func TestNoHooksAllocatesNothing(t *testing.T) {
 		t.Errorf("beforeQuery built an event with no hooks registered")
 	}
 	db.afterQuery(ctx, event, nil, nil) // must not panic on the nil event
+
+	var nilDB *DB
+	ctx, event = nilDB.beforeQuery("SELECT 1", nil)
+	if ctx != nil || event != nil {
+		t.Errorf("beforeQuery built an event for a nil DB")
+	}
 }
 
 func TestUnformattedQueryKeepsPlaceholders(t *testing.T) {
@@ -120,6 +127,37 @@ func TestUnformattedQueryKeepsPlaceholders(t *testing.T) {
 	// A builder query is not raw SQL, and must not be guessed at.
 	if _, ok := (&QueryEvent{Query: struct{}{}}).UnformattedQuery(); ok {
 		t.Error("UnformattedQuery claimed a non-string query was raw SQL")
+	}
+}
+
+func TestFormattedQueryRejectsPreparedParameters(t *testing.T) {
+	ev := &QueryEvent{
+		DB:       &DB{},
+		Query:    "SELECT * FROM users WHERE id = $1",
+		Params:   []interface{}{42},
+		prepared: true,
+	}
+	if _, err := ev.FormattedQuery(); err == nil {
+		t.Fatal("FormattedQuery formatted a prepared statement it cannot substitute")
+	}
+}
+
+func TestFormattedQueryWithoutDBReturnsError(t *testing.T) {
+	ev := &QueryEvent{Query: "SELECT 1"}
+	if _, err := ev.FormattedQuery(); err == nil {
+		t.Fatal("FormattedQuery succeeded without the DB formatter")
+	}
+}
+
+func TestStickyPreparedStatementReturnsError(t *testing.T) {
+	want := errors.New("prepare failed")
+	stmt := &Stmt{stickyErr: want}
+
+	if _, err := stmt.Exec(); err != want {
+		t.Fatalf("Exec error = %v, want %v", err, want)
+	}
+	if _, err := stmt.Query(nil); err != want {
+		t.Fatalf("Query error = %v, want %v", err, want)
 	}
 }
 
@@ -164,23 +202,36 @@ func hookNames(db *DB) string {
 	return out
 }
 
-// TestFailedAcquisitionIsNotObserved pins a LIMITATION, not a desired
-// behaviour. The hooks sit in simpleQuery, which is only reached once a
-// connection is in hand, so a query that never gets one produces no event at
-// all — a hook cannot tell "the pool is exhausted" from "no traffic".
-//
-// This is the documented cost of hooking at the low-level query path rather
-// than at DB.Exec/DB.Query. Change the boundary and this test changes with it;
-// it exists so the trade-off is visible rather than discovered.
-func TestFailedAcquisitionIsNotObserved(t *testing.T) {
+// TestHooksFireOncePerLogicalQuery pins the boundary the reviewer asked for:
+// one pair per query the caller issued, wrapping connection acquisition and any
+// retries, reporting the final outcome — not one pair per attempt.
+func TestHooksFireOncePerLogicalQuery(t *testing.T) {
 	var order []string
 	db := unreachableDB()
 	db.AddQueryHook(&recordingHook{name: "h", order: &order})
 
+	// Nothing is listening, so every attempt fails at connection acquisition —
+	// the case that previously produced no event at all in v5.
 	_, _ = db.Exec("SELECT 1")
 
-	if len(order) != 0 {
-		t.Errorf("hook calls = %v; the boundary moved — update this test and the doc comment on QueryHook", order)
+	if len(order) != 2 || order[0] != "before:h" || order[1] != "after:h" {
+		t.Fatalf("hook calls = %v, want exactly one before/after pair", order)
+	}
+}
+
+// TestFailedAcquisitionReportsTheError proves the event carries the failure
+// rather than being skipped: a hook that only ever sees successes cannot tell
+// "database is down" from "no traffic".
+func TestFailedAcquisitionReportsTheError(t *testing.T) {
+	var order []string
+	hook := &recordingHook{name: "h", order: &order}
+	db := unreachableDB()
+	db.AddQueryHook(hook)
+
+	_, _ = db.Exec("SELECT 1")
+
+	if hook.sawErr == nil {
+		t.Error("AfterQuery saw no error for a query that could not get a connection")
 	}
 }
 
