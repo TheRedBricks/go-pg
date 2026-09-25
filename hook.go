@@ -11,7 +11,8 @@ import (
 
 // QueryEvent describes one logical query operation. It is passed to every
 // registered QueryHook before the operation starts and again after its final
-// result is known, including connection acquisition, retries, and callbacks.
+// result is known, including connection acquisition, retries, and the
+// row-scanning Model.AfterQuery callback.
 type QueryEvent struct {
 	StartTime time.Time
 	DB        *DB
@@ -48,6 +49,14 @@ func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 // substitutes every bound parameter, so the rendered text of a Model query
 // carries the ids and addresses a span attribute must not. Both values here are
 // safe to export — a keyword and an identifier declared in a struct tag.
+func (ev *QueryEvent) Statement() (operation, table string) {
+	d, ok := ev.Query.(orm.StatementDescriber)
+	if !ok {
+		return "", ""
+	}
+	return d.StatementOperation(), d.StatementTable()
+}
+
 // StatementText renders a builder query as a template: full SQL structure with
 // every bound value left as its placeholder, so it is safe on a span. Returns
 // "" for raw SQL — UnformattedQuery already has that, unrendered and therefore
@@ -65,14 +74,6 @@ func (ev *QueryEvent) StatementText() string {
 		return ""
 	}
 	return text
-}
-
-func (ev *QueryEvent) Statement() (operation, table string) {
-	d, ok := ev.Query.(orm.StatementDescriber)
-	if !ok {
-		return "", ""
-	}
-	return d.StatementOperation(), d.StatementTable()
 }
 
 // FormattedQuery returns the statement exactly as it went to the server for

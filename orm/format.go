@@ -108,7 +108,7 @@ func (f Formatter) String() string {
 }
 
 func (f Formatter) Copy() Formatter {
-	var cp Formatter
+	cp := Formatter{sanitize: f.sanitize}
 	for param, value := range f.namedParams {
 		cp.SetParam(param, value)
 	}

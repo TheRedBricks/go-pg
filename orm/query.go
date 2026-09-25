@@ -729,10 +729,17 @@ func (q *Query) appendWith(b []byte, count string) ([]byte, error) {
 		b = types.AppendField(b, with.name, 1)
 		b = append(b, " AS ("...)
 
+		withQuery := with.query
+		if q.sanitize && withQuery != nil {
+			cp := *withQuery
+			cp.sanitize = true
+			withQuery = &cp
+		}
+
 		if count != "" {
-			b, err = with.query.countSelectQuery("*").AppendQuery(b)
+			b, err = withQuery.countSelectQuery("*").AppendQuery(b)
 		} else {
-			b, err = selectQuery{Query: with.query}.AppendQuery(b)
+			b, err = selectQuery{Query: withQuery}.AppendQuery(b)
 		}
 		if err != nil {
 			return nil, err

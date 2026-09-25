@@ -131,6 +131,16 @@ func TestStatementTextIgnoresWithParam(t *testing.T) {
 	f := base.WithParam("tenant", "acme-secret")
 	sanitized := f.Sanitized()
 
+	for name, copied := range map[string]Formatter{
+		"Copy":      sanitized.Copy(),
+		"WithParam": sanitized.WithParam("other", "other-secret"),
+	} {
+		got := string(copied.Append(nil, "SELECT * FROM t WHERE x = ?tenant AND y = ?other", nil))
+		if strings.Contains(got, "acme-secret") || strings.Contains(got, "other-secret") {
+			t.Errorf("%s lost sanitization: %q", name, got)
+		}
+	}
+
 	got := string(sanitized.Append(nil, "SELECT * FROM t WHERE x = ?tenant", nil))
 	if strings.Contains(got, "acme-secret") {
 		t.Errorf("WithParam value leaked: %q", got)
@@ -140,6 +150,21 @@ func TestStatementTextIgnoresWithParam(t *testing.T) {
 	live := string(f.Append(nil, "SELECT * FROM t WHERE x = ?tenant", nil))
 	if !strings.Contains(live, "acme-secret") {
 		t.Errorf("Sanitized() mutated the original formatter: %q", live)
+	}
+}
+
+func TestStatementTextSanitizesCTEs(t *testing.T) {
+	cte := NewQuery(nil, &StatementModel{}).Where("email = ?", "cte-secret@example.com")
+	q := NewQuery(nil, &StatementModel{}).With("private_rows", cte)
+	text, err := selectQuery{Query: q}.StatementText()
+	if err != nil {
+		t.Fatalf("StatementText: %v", err)
+	}
+	if strings.Contains(text, "cte-secret@example.com") {
+		t.Fatalf("CTE value leaked: %s", text)
+	}
+	if !strings.Contains(text, "WITH") || !strings.Contains(text, "?") {
+		t.Fatalf("CTE structure was lost: %s", text)
 	}
 }
 
