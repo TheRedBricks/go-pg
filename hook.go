@@ -38,7 +38,9 @@ func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 	return q, ok
 }
 
-// FormattedQuery returns the statement exactly as it went to the server.
+// FormattedQuery renders the event's current query and parameters. For builder
+// operations called from AfterQuery, model callbacks may already have mutated
+// the model, so the result is not guaranteed to be the exact bytes sent.
 //
 // ⚠️ This INLINES every bound parameter, so it contains whatever the caller
 // passed — ids, emails, whole row payloads. Safe for local debugging; not safe

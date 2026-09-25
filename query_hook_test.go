@@ -174,10 +174,10 @@ func hookNames(db *DB) string {
 	return out
 }
 
-// TestHooksFireOncePerLogicalQuery pins the boundary the reviewer asked for:
-// one pair per query the caller issued, wrapping connection acquisition and any
-// retries, reporting the final outcome — not one pair per attempt.
-func TestHooksFireOncePerLogicalQuery(t *testing.T) {
+// TestHooksObserveFailedAcquisition pins the outer boundary: even a query that
+// cannot acquire a connection receives one before/after pair. Retry behavior
+// needs a protocol-level fake server and is covered outside this unit test.
+func TestHooksObserveFailedAcquisition(t *testing.T) {
 	var order []string
 	db := unreachableDB()
 	db.AddQueryHook(&recordingHook{name: "h", order: &order})
