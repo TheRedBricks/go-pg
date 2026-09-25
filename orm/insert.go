@@ -96,6 +96,10 @@ func (q *insertQuery) appendValues(b []byte, fields []*Field, v reflect.Value) [
 		if f.OmitEmpty(v) {
 			b = append(b, "DEFAULT"...)
 			q.addReturningField(f)
+		} else if q.sanitize {
+			// A VALUES list IS the row, so a sanitized render must withhold all
+			// of it — the columns above already say what is being written.
+			b = append(b, '?')
 		} else {
 			b = f.AppendValue(b, v, 1)
 		}

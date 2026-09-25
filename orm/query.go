@@ -22,6 +22,11 @@ type Query struct {
 
 	model       tableModel
 	ignoreModel bool
+	// sanitize renders this query as a template: placeholders instead of bound
+	// values. Set only on the throwaway copy StatementText builds, never on a
+	// query that will actually be executed. Deliberately packed beside
+	// ignoreModel — it fits that field's padding, so Query does not grow.
+	sanitize bool
 
 	with       []withQuery
 	tables     []FormatAppender
@@ -206,7 +211,7 @@ func (q *Query) WhereOr(where string, params ...interface{}) *Query {
 
 // WhereIn is a shortcut for Where and pg.In to work with IN operator:
 //
-//    WhereIn("id IN (?)", 1, 2, 3)
+//	WhereIn("id IN (?)", 1, 2, 3)
 func (q *Query) WhereIn(where string, params ...interface{}) *Query {
 	return q.Where(where, types.In(params))
 }
@@ -580,11 +585,18 @@ func (q *Query) Delete() (*types.Result, error) {
 
 func (q *Query) FormatQuery(dst []byte, query string, params ...interface{}) []byte {
 	params = append(params, q.model)
+	if q.sanitize {
+		// Deliberately not q.db's formatter: that one carries WithParam values,
+		// which are data. A sanitized render must not reach them.
+		return Formatter{sanitize: true}.Append(dst, query, params...)
+	}
 	if q.db != nil {
 		return q.db.FormatQuery(dst, query, params...)
 	}
 	return Formatter{}.Append(dst, query, params...)
 }
+
+func (q *Query) sanitizing() bool { return q != nil && q.sanitize }
 
 func (q *Query) hasModel() bool {
 	return !q.ignoreModel && q.model != nil
@@ -667,7 +679,9 @@ func (q *Query) mustAppendWhere(b []byte) ([]byte, error) {
 	}
 
 	b = append(b, " WHERE "...)
-	return wherePKQuery{q}.AppendFormat(b, nil), nil
+	// q, not nil: wherePKQuery reads the sanitize flag off the formatter it is
+	// handed, and a discarded formatter renders the primary key.
+	return wherePKQuery{q}.AppendFormat(b, q), nil
 }
 
 func (q *Query) appendWhere(b []byte) []byte {
@@ -715,10 +729,17 @@ func (q *Query) appendWith(b []byte, count string) ([]byte, error) {
 		b = types.AppendField(b, with.name, 1)
 		b = append(b, " AS ("...)
 
+		withQuery := with.query
+		if q.sanitize && withQuery != nil {
+			cp := *withQuery
+			cp.sanitize = true
+			withQuery = &cp
+		}
+
 		if count != "" {
-			b, err = with.query.countSelectQuery("*").AppendQuery(b)
+			b, err = withQuery.countSelectQuery("*").AppendQuery(b)
 		} else {
-			b, err = selectQuery{Query: with.query}.AppendQuery(b)
+			b, err = selectQuery{Query: withQuery}.AppendQuery(b)
 		}
 		if err != nil {
 			return nil, err
@@ -742,5 +763,10 @@ func (wherePKQuery) AppendSep(b []byte) []byte {
 
 func (q wherePKQuery) AppendFormat(b []byte, f QueryFormatter) []byte {
 	table := q.model.Table()
+	// This appender renders values directly rather than through FormatQuery, so
+	// it is the one place the sanitize flag has to be read off the formatter.
+	if isSanitizing(f) {
+		return appendColumnAndPlaceholder(b, table, table.PKs)
+	}
 	return appendColumnAndValue(b, q.model.Value(), table, table.PKs)
 }
