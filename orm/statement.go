@@ -1,7 +1,5 @@
 package orm
 
-import "strings"
-
 // StatementDescriber is implemented by every query builder this package hands
 // to the DB. It lets a query hook name a statement — "SELECT bookings" — from
 // the builder itself.
@@ -33,7 +31,17 @@ func statementTable(q *Query) string {
 	if t == nil {
 		return ""
 	}
-	return strings.Trim(string(t.Name), `"`)
+	return unquoteIdentifier(string(t.Name))
+}
+
+func unquoteIdentifier(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '"' {
+			b = append(b, s[i])
+		}
+	}
+	return string(b)
 }
 
 func (q selectQuery) StatementOperation() string { return "SELECT" }

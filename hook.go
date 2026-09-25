@@ -2,14 +2,16 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"gopkg.in/pg.v4/orm"
 	"gopkg.in/pg.v4/types"
 )
 
-// QueryEvent describes one statement sent to the server. It is passed to every
-// registered QueryHook, before the query runs and again after it returns.
+// QueryEvent describes one logical Exec or Query operation. It is passed to
+// every registered QueryHook before connection acquisition and again after the
+// final result, including retries.
 type QueryEvent struct {
 	StartTime time.Time
 	DB        *DB
@@ -20,6 +22,8 @@ type QueryEvent struct {
 	// Result and Error are only set by the time AfterQuery is called.
 	Result *types.Result
 	Error  error
+
+	prepared bool
 }
 
 // UnformattedQuery returns the statement as the caller wrote it, with its
@@ -40,6 +44,9 @@ func (ev *QueryEvent) UnformattedQuery() (string, bool) {
 // passed — ids, emails, whole row payloads. Safe for local debugging; not safe
 // to put on a span or ship anywhere. Prefer UnformattedQuery for those.
 func (ev *QueryEvent) FormattedQuery() (string, error) {
+	if ev.prepared && len(ev.Params) > 0 {
+		return "", errors.New("pg: cannot format PostgreSQL prepared-statement parameters")
+	}
 	b, err := appendQuery(nil, ev.Query, ev.Params...)
 	if err != nil {
 		return "", err
@@ -61,7 +68,9 @@ func (ev *QueryEvent) Statement() (operation, table string) {
 	return d.StatementOperation(), d.StatementTable()
 }
 
-// QueryHook observes every statement this DB runs.
+// QueryHook observes logical Exec and Query operations run through DB, Tx, and
+// Stmt. CopyFrom, CopyTo, statement preparation, and internal session setup are
+// not observed.
 //
 // BeforeQuery's returned context is handed back to AfterQuery, which is how a
 // hook carries state — a span, a start time — across the two calls without a
@@ -129,6 +138,14 @@ func (db *DB) beforeQuery(query interface{}, params []interface{}) (context.Cont
 		if next := hook.BeforeQuery(ctx, event); next != nil {
 			ctx = next
 		}
+	}
+	return ctx, event
+}
+
+func (db *DB) beforePreparedQuery(query string, params []interface{}) (context.Context, *QueryEvent) {
+	ctx, event := db.beforeQuery(query, params)
+	if event != nil {
+		event.prepared = true
 	}
 	return ctx, event
 }

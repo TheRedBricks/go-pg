@@ -53,7 +53,7 @@ func TestQueryHookReceivesWithContext(t *testing.T) {
 }
 
 // TestCopyHelpersCarryHooksAndContext guards the trap this change introduces:
-// WithTimeout and WithParam build a DB literal field by field, so a new field
+// WithTimeout and WithContext build a DB literal field by field, so a new field
 // that is not listed there is silently dropped — and the symptom would be a
 // hook that just stops firing after a caller sets a timeout.
 func TestCopyHelpersCarryHooksAndContext(t *testing.T) {
@@ -119,6 +119,17 @@ func TestUnformattedQueryKeepsPlaceholders(t *testing.T) {
 	// A builder query is not raw SQL, and must not be guessed at.
 	if _, ok := (&QueryEvent{Query: struct{}{}}).UnformattedQuery(); ok {
 		t.Error("UnformattedQuery claimed a non-string query was raw SQL")
+	}
+}
+
+func TestFormattedQueryRejectsPreparedParameters(t *testing.T) {
+	ev := &QueryEvent{
+		Query:    "SELECT * FROM users WHERE id = $1",
+		Params:   []interface{}{42},
+		prepared: true,
+	}
+	if _, err := ev.FormattedQuery(); err == nil {
+		t.Fatal("FormattedQuery formatted a prepared statement it cannot substitute")
 	}
 }
 

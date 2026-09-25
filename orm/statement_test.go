@@ -82,3 +82,9 @@ func TestStatementTableNeverExposesRenderedClauses(t *testing.T) {
 		t.Errorf("StatementTable() = %q, want statement_models", sq.StatementTable())
 	}
 }
+
+func TestUnquoteIdentifierPreservesSchemaQualification(t *testing.T) {
+	if got := unquoteIdentifier(`"billing"."invoices"`); got != "billing.invoices" {
+		t.Fatalf("unquoteIdentifier() = %q, want billing.invoices", got)
+	}
+}
