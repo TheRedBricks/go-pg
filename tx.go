@@ -126,13 +126,16 @@ func (tx *Tx) Prepare(q string) (*Stmt, error) {
 }
 
 // Exec executes a query with the given parameters in a transaction.
-func (tx *Tx) Exec(query interface{}, params ...interface{}) (*types.Result, error) {
+func (tx *Tx) Exec(query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := tx.db.beforeQuery(query, params)
+	defer func() { tx.db.afterQuery(hookCtx, event, res, err) }()
+
 	cn, err := tx.conn()
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := simpleQuery(cn, query, params...)
+	res, err = simpleQuery(cn, query, params...)
 	tx.freeConn(cn, err)
 	return res, err
 }
@@ -149,7 +152,10 @@ func (tx *Tx) ExecOne(query interface{}, params ...interface{}) (*types.Result, 
 }
 
 // Query executes a query with the given parameters in a transaction.
-func (tx *Tx) Query(model interface{}, query interface{}, params ...interface{}) (*types.Result, error) {
+func (tx *Tx) Query(model interface{}, query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := tx.db.beforeQuery(query, params)
+	defer func() { tx.db.afterQuery(hookCtx, event, res, err) }()
+
 	cn, err := tx.conn()
 	if err != nil {
 		return nil, err
