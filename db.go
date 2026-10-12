@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -30,6 +31,13 @@ type DB struct {
 	opt   *Options
 	pool  *pool.ConnPool
 	fmter orm.Formatter
+
+	// ctx is what WithContext set, handed to QueryHooks. Nil means none; use
+	// Context() rather than reading it directly.
+	ctx context.Context
+	// queryHooks is read on the query path without synchronisation, so it must
+	// only be appended to during setup. See AddQueryHook.
+	queryHooks []QueryHook
 }
 
 var _ orm.DB = (*DB)(nil)
@@ -49,18 +57,22 @@ func (db *DB) WithTimeout(d time.Duration) *DB {
 	newopt.ReadTimeout = d
 	newopt.WriteTimeout = d
 	return &DB{
-		opt:   &newopt,
-		pool:  db.pool,
-		fmter: db.fmter,
+		opt:        &newopt,
+		pool:       db.pool,
+		fmter:      db.fmter,
+		ctx:        db.ctx,
+		queryHooks: db.queryHooks,
 	}
 }
 
 // WithParam returns a DB that replaces the param with the value in queries.
 func (db *DB) WithParam(param string, value interface{}) *DB {
 	return &DB{
-		opt:   db.opt,
-		pool:  db.pool,
-		fmter: db.fmter.WithParam(param, value),
+		opt:        db.opt,
+		pool:       db.pool,
+		fmter:      db.fmter.WithParam(param, value),
+		ctx:        db.ctx,
+		queryHooks: db.queryHooks,
 	}
 }
 
@@ -142,6 +154,9 @@ func (db *DB) Close() error {
 // Exec executes a query ignoring returned rows. The params are for any
 // placeholders in the query.
 func (db *DB) Exec(query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := db.beforeQuery(query, params)
+	defer func() { db.afterQuery(hookCtx, event, res, err) }()
+
 	for i := 0; ; i++ {
 		var cn *pool.Conn
 
@@ -183,6 +198,9 @@ func (db *DB) ExecOne(query interface{}, params ...interface{}) (*types.Result, 
 // Query executes a query that returns rows, typically a SELECT.
 // The params are for any placeholders in the query.
 func (db *DB) Query(model, query interface{}, params ...interface{}) (res *types.Result, err error) {
+	hookCtx, event := db.beforeQuery(query, params)
+	defer func() { db.afterQuery(hookCtx, event, res, err) }()
+
 	var mod orm.Model
 	for i := 0; i < 3; i++ {
 		var cn *pool.Conn

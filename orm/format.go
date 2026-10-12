@@ -74,6 +74,19 @@ func (a fieldAppender) AppendFormat(b []byte, f QueryFormatter) []byte {
 
 type Formatter struct {
 	namedParams map[string]interface{}
+	// sanitize renders the statement as a template: every bound VALUE is left as
+	// its placeholder instead of being substituted. It is what makes a rendered
+	// query safe to put on a span or a log line. See Sanitized.
+	sanitize bool
+}
+
+// Sanitized returns a copy of this formatter that renders placeholders instead
+// of values. Structure — table names, aliases, column lists — still renders, so
+// the result is the statement's shape with none of its data.
+func (f Formatter) Sanitized() Formatter {
+	cp := f.Copy()
+	cp.sanitize = true
+	return cp
 }
 
 func (f Formatter) String() string {
@@ -95,7 +108,7 @@ func (f Formatter) String() string {
 }
 
 func (f Formatter) Copy() Formatter {
-	var cp Formatter
+	cp := Formatter{sanitize: f.sanitize}
 	for param, value := range f.namedParams {
 		cp.SetParam(param, value)
 	}
@@ -171,11 +184,15 @@ func (f Formatter) append(dst []byte, p *parser.Parser, params []interface{}) []
 					goto restore_param
 				}
 
+				if f.sanitize {
+					dst = append(dst, '?')
+					continue
+				}
 				dst = f.appendParam(dst, params[idx])
 				continue
 			}
 
-			if f.namedParams != nil {
+			if f.namedParams != nil && !f.sanitize {
 				if param, ok := f.namedParams[id]; ok {
 					dst = f.appendParam(dst, param)
 					continue
@@ -190,14 +207,14 @@ func (f Formatter) append(dst []byte, p *parser.Parser, params []interface{}) []
 				namedParamsInit = true
 			}
 
-			if namedParams != nil {
+			if namedParams != nil && !f.sanitize {
 				dst, ok = namedParams.AppendParam(dst, id)
 				if ok {
 					continue
 				}
 			}
 
-			if model != nil {
+			if model != nil && (!f.sanitize || isStructuralParam(id)) {
 				dst, ok = model.AppendParam(dst, id)
 				if ok {
 					continue
@@ -219,7 +236,11 @@ func (f Formatter) append(dst []byte, p *parser.Parser, params []interface{}) []
 		paramsIndex++
 
 		if fa, ok := param.(FormatAppender); ok {
+			// f carries the sanitize flag, so a nested expression or subquery is
+			// rendered under the same rules rather than escaping them.
 			dst = fa.AppendFormat(dst, f)
+		} else if f.sanitize && !isStructuralParamValue(param) {
+			dst = append(dst, '?')
 		} else {
 			dst = types.Append(dst, param, 1)
 		}
@@ -233,4 +254,62 @@ func (f Formatter) appendParam(b []byte, param interface{}) []byte {
 		return fa.AppendFormat(b, f)
 	}
 	return types.Append(b, param, 1)
+}
+
+// isStructuralParam reports whether a named placeholder resolves to part of the
+// statement's STRUCTURE rather than to data.
+//
+// Table.AppendParam resolves a name against the model's fields and methods, so
+// ?SomeField and ?SomeMethod both yield row data. Only the alias is structure,
+// and only it may render while sanitizing; everything else falls through to be
+// restored as the placeholder it was written as.
+func isStructuralParam(name string) bool {
+	switch name {
+	case "TableName", "TableAlias":
+		return true
+	}
+	return false
+}
+
+// isStructuralParamValue reports whether a positional parameter is part of the
+// statement's structure rather than a bound value.
+//
+// types.F is an identifier — always structure, always safe to render.
+//
+// types.Q is deliberately NOT treated as structure despite being "raw SQL".
+// go-pg builds relation joins by pre-rendering the parent rows' primary keys
+// and wrapping them in types.Q (see the `(?) IN (?)` in join.go), so trusting
+// the type would export exactly the row ids this is meant to withhold. The one
+// exception is a sort direction, which is a closed two-value set and is what
+// keeps ORDER BY readable.
+func isStructuralParamValue(param interface{}) bool {
+	switch p := param.(type) {
+	case types.F:
+		return true
+	case types.Q:
+		return isSortDirection(string(p))
+	}
+	return false
+}
+
+func isSortDirection(s string) bool {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "ASC", "DESC":
+		return true
+	}
+	return false
+}
+
+// sanitizer is implemented by the formatters that carry the sanitize flag, so
+// an appender that bypasses FormatQuery entirely can still honour it.
+type sanitizer interface {
+	sanitizing() bool
+}
+
+func (f Formatter) sanitizing() bool { return f.sanitize }
+
+// isSanitizing reports whether this render must withhold bound values.
+func isSanitizing(f QueryFormatter) bool {
+	s, ok := f.(sanitizer)
+	return ok && s.sanitizing()
 }

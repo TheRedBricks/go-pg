@@ -62,6 +62,20 @@ func (stmt *Stmt) exec(params ...interface{}) (*types.Result, error) {
 
 // Exec executes a prepared statement with the given parameters.
 func (stmt *Stmt) Exec(params ...interface{}) (res *types.Result, err error) {
+	if stmt.db == nil {
+		err = stmt.stickyErr
+		if err == nil {
+			err = errStmtClosed
+		}
+		return
+	}
+
+	// Prepared statements run the extended-query protocol, which never reaches
+	// simpleQuery — so they need their own hook pair or they are invisible.
+	// stmt.q is the statement as prepared; params are this execution's.
+	hookCtx, event := stmt.db.beforePreparedQuery(stmt.q, params)
+	defer func() { stmt.db.afterQuery(hookCtx, event, res, err) }()
+
 	for i := 0; i < 3; i++ {
 		res, err = stmt.exec(params...)
 
@@ -120,6 +134,17 @@ func (stmt *Stmt) query(model interface{}, params ...interface{}) (*types.Result
 
 // Query executes a prepared query statement with the given parameters.
 func (stmt *Stmt) Query(model interface{}, params ...interface{}) (res *types.Result, err error) {
+	if stmt.db == nil {
+		err = stmt.stickyErr
+		if err == nil {
+			err = errStmtClosed
+		}
+		return
+	}
+
+	hookCtx, event := stmt.db.beforePreparedQuery(stmt.q, params)
+	defer func() { stmt.db.afterQuery(hookCtx, event, res, err) }()
+
 	for i := 0; i < 3; i++ {
 		res, err = stmt.query(model, params...)
 
